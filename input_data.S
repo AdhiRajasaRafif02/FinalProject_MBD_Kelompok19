@@ -1,128 +1,228 @@
-; Program Assembly untuk menghitung DAYA (P = V × I)
-; Menggunakan ZMPT101B (ADC0) dan ACS712 (ADC1) pada ATMega328P
-; Hasil daya (dalam mW) disimpan di R25:R24:R23 (24-bit)
+; Power Monitoring dengan Arduino UNO (AVR Assembly)
+; Membaca sensor tegangan dari pin A0
+; Membaca sensor arus dari pin A1
+; Menghitung daya (P = V * I) dengan 1 desimal
+; Menampilkan hasil daya di Serial Monitor
 
-.include "m328pdef.inc"
+.include "m328pdef.inc"        ; Include definisi untuk ATmega328P (Arduino UNO)
 
-; Definisi register
-.equ ADMUX_SET = (1 << REFS0)  ; AVcc sebagai referensi (5V)
-.equ ADCSRA_SET = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0)  ; ADC Enable, prescaler 128
-.equ ACS_OFFSET = 512          ; Nilai ADC saat 0A (2.5V)
-.equ VOLTAGE_CAL = 22          ; Kalibrasi tegangan (ZMPT101B)
-.equ CURRENT_SENS = 20         ; Sensitivitas ACS712-20A (20 steps/A)
+; Definisi konstanta
+.equ BAUD_RATE = 9600          ; Baudrate untuk komunikasi serial
+.equ F_CPU = 16000000          ; Frekuensi clock Arduino UNO
 
-; Variabel SRAM
+; Penghitungan UBRR untuk komunikasi serial
+.equ UBRR_VALUE = F_CPU/(16*BAUD_RATE)-1
+
+; Alokasi register
+.def temp = r16                ; Register sementara
+.def voltage = r17             ; Nilai tegangan
+.def current = r18             ; Nilai arus
+.def power_low = r19           ; Byte rendah nilai daya
+.def power_high = r20          ; Byte tinggi nilai daya
+.def decimal = r21             ; Bagian desimal dari daya
+.def digit = r22               ; Digit untuk konversi ASCII
+
+; Segment data
 .dseg
-.org 0x0100
-voltage:    .byte 2  ; Tegangan dalam mV (16-bit)
-current:    .byte 2  ; Arus dalam mA (16-bit)
-power:      .byte 3  ; Daya dalam mW (24-bit)
+message:        .byte 20       ; Buffer untuk pesan
+power_str:      .byte 10       ; String untuk nilai daya
 
-; Program utama
+; Segment kode
 .cseg
-.org 0x0000
-    rjmp main
+.org 0x0000                    ; Alamat reset
+    rjmp setup                 ; Lompat ke setup
 
-main:
+; Setup program
+setup:
     ; Inisialisasi stack pointer
-    ldi r16, high(RAMEND)
-    out SPH, r16
-    ldi r16, low(RAMEND)
-    out SPL, r16
+    ldi temp, HIGH(RAMEND)
+    out SPH, temp
+    ldi temp, LOW(RAMEND)
+    out SPL, temp
+    
+    ; Setup ADC
+    ldi temp, (1<<ADEN)|(1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0) ; Enable ADC, prescaler = 128
+    sts ADCSRA, temp
+    ldi temp, (1<<REFS0)       ; AVCC sebagai referensi
+    sts ADMUX, temp
+    
+    ; Setup UART untuk Serial Monitor
+    ; Atur baud rate
+    ldi temp, HIGH(UBRR_VALUE)
+    sts UBRR0H, temp
+    ldi temp, LOW(UBRR_VALUE)
+    sts UBRR0L, temp
+    
+    ; Enable transmitter
+    ldi temp, (1<<TXEN0)
+    sts UCSR0B, temp
+    
+    ; Format: 8 data, 1 stop bit
+    ldi temp, (1<<UCSZ01)|(1<<UCSZ00)
+    sts UCSR0C, temp
+    
+    ; Jeda singkat untuk stabilisasi
+    rcall delay_100ms
 
-    ; Konfigurasi ADC
-    ldi r16, ADMUX_SET
-    sts ADMUX, r16
-    ldi r16, ADCSRA_SET
-    sts ADCSRA, r16
+main_loop:
+    ; Baca sensor tegangan (A0)
+    ldi temp, (1<<REFS0)       ; AVCC referensi, pilih ADC0 (A0)
+    sts ADMUX, temp
+    
+    ; Start konversi
+    lds temp, ADCSRA
+    ori temp, (1<<ADSC)
+    sts ADCSRA, temp
+    
+wait_adc1:
+    ; Tunggu konversi selesai
+    lds temp, ADCSRA
+    sbrc temp, ADSC
+    rjmp wait_adc1
+    
+    ; Ambil hasil tegangan (untuk contoh: skala 0-255 saja)
+    lds voltage, ADCL
+    lds temp, ADCH          ; Baca ADCH untuk mereset flag ADC
+    
+    ; Baca sensor arus (A1)
+    ldi temp, (1<<REFS0)|(1<<MUX0)  ; AVCC referensi, pilih ADC1 (A1)
+    sts ADMUX, temp
+    
+    ; Start konversi
+    lds temp, ADCSRA
+    ori temp, (1<<ADSC)
+    sts ADCSRA, temp
+    
+wait_adc2:
+    ; Tunggu konversi selesai
+    lds temp, ADCSRA
+    sbrc temp, ADSC
+    rjmp wait_adc2
+    
+    ; Ambil hasil arus (untuk contoh: skala 0-255 saja)
+    lds current, ADCL
+    lds temp, ADCH          ; Baca ADCH untuk mereset flag ADC
+    
+    ; Hitung daya: P = V * I (sederhana dengan 1 angka di belakang koma)
+    ; Gunakan multiplikasi 8-bit
+    mul voltage, current    ; Hasil di r1:r0
+    
+    ; Simpan hasil
+    mov power_low, r0
+    mov power_high, r1
+    
+    ; Untuk mendapatkan 1 digit desimal, kita akan menggunakan pendekatan sederhana
+    ; Misalnya jika voltage=3 dan current=2, kita ingin power = 6,0
+    ; Jika voltage=3 dan current=2.5, kita ingin power = 7,5
+    ; Untuk contoh sederhana ambil digit terakhir sebagai desimal
+    mov decimal, power_low
+    andi decimal, 0x0F      ; Ambil 4 bit terendah sebagai desimal
+    
+    ; Tampilkan hasil di Serial Monitor
+    rcall send_power_to_serial
+    
+    ; Jeda sebelum pembacaan berikutnya
+    rcall delay_1s
+    
+    rjmp main_loop
 
-    ; Inisialisasi UART (untuk debug, opsional)
-    call uart_init
-
-loop:
-    ; 1. Baca tegangan (ZMPT101B di ADC0)
-    ldi r16, 0
-    sts ADMUX, r16        ; Pilih ADC0
-    call read_adc         ; Hasil di R1:R0
-    call calculate_voltage ; Konversi ke mV, hasil di R21:R20
-
-    ; Simpan tegangan ke SRAM
-    sts voltage, r20
-    sts voltage+1, r21
-
-    ; 2. Baca arus (ACS712 di ADC1)
-    ldi r16, 1
-    sts ADMUX, r16        ; Pilih ADC1
-    call read_adc         ; Hasil di R1:R0
-    call calculate_current ; Konversi ke mA, hasil di R21:R20
-
-    ; Simpan arus ke SRAM
-    sts current, r20
-    sts current+1, r21
-
-    ; 3. Hitung daya (P = V × I)
-    lds r18, voltage      ; Load tegangan (low byte)
-    lds r19, voltage+1    ; high byte
-    lds r20, current      ; Load arus (low byte)
-    lds r21, current+1    ; high byte
-    call multiply_16x16   ; Hasil di R25:R24:R23 (24-bit)
-
-    ; Simpan daya ke SRAM
-    sts power, r23
-    sts power+1, r24
-    sts power+2, r25
-
-    ; 4. Tampilkan hasil via UART (opsional)
-    call display_results
-
-    ; Delay
-    call delay_1s
-
-    rjmp loop
-
-; --- Subroutine ---
-read_adc:
-    ; Mulai konversi ADC
-    lds r16, ADCSRA
-    ori r16, (1 << ADSC)
-    sts ADCSRA, r16
-wait_adc:
-    lds r16, ADCSRA
-    sbrs r16, ADIF
-    rjmp wait_adc
-    lds r0, ADCL
-    lds r1, ADCH
-    lds r16, ADCSRA
-    ori r16, (1 << ADIF)
-    sts ADCSRA, r16
+; ---- Subrutin untuk mengirim nilai daya ke Serial Monitor ----
+send_power_to_serial:
+    ; Kirim string "Daya: "
+    ldi ZL, LOW(power_message*2)
+    ldi ZH, HIGH(power_message*2)
+    rcall send_string
+    
+    ; Konversi power_high:power_low menjadi desimal
+    ; Untuk contoh sederhana, kita hanya tampilkan nilai langsung
+    ; dan 1 digit desimal
+    
+    ; Konversi nilai bulat ke ASCII dan kirim
+    mov digit, power_high
+    rcall convert_and_send_digit
+    
+    mov digit, power_low
+    lsr digit            ; Bagi dengan 16 (geser 4x ke kanan)
+    lsr digit
+    lsr digit
+    lsr digit
+    rcall convert_and_send_digit
+    
+    ; Kirim tanda koma
+    ldi temp, '.'
+    rcall send_char
+    
+    ; Kirim digit desimal
+    mov digit, decimal
+    andi digit, 0x0F     ; Pastikan hanya 1 digit
+    rcall convert_and_send_digit
+    
+    ; Kirim newline
+    ldi temp, 13         ; CR
+    rcall send_char
+    ldi temp, 10         ; LF
+    rcall send_char
+    
     ret
 
-calculate_voltage:
-    ; Konversi ADC ke tegangan (mV): V = (ADC × 5000 × VOLTAGE_CAL) / 1023
-    ; Input: R1:R0 (ADC), Output: R21:R20 (mV)
-    ; Implementasi disederhanakan (butuh perkalian 16x16)
+; Konversi digit menjadi ASCII dan kirim
+convert_and_send_digit:
+    andi digit, 0x0F     ; Pastikan hanya 1 digit
+    ldi temp, '0'
+    add temp, digit      ; Konversi ke ASCII
+    rcall send_char
     ret
 
-calculate_current:
-    ; Konversi ADC ke arus (mA): I = ((ADC - 512) × 5000) / (1023 × CURRENT_SENS)
-    ; Input: R1:R0 (ADC), Output: R21:R20 (mA)
-    ; Implementasi disederhanakan (butuh pengurangan dan perkalian)
+; Kirim string dari program memory
+send_string:
+    lpm temp, Z+         ; Load byte dari program memory
+    tst temp
+    breq send_string_end ; Jika null terminator, selesai
+    rcall send_char      ; Kirim karakter
+    rjmp send_string     ; Loop hingga semua terkirim
+send_string_end:
     ret
 
-multiply_16x16:
-    ; Perkalian 16-bit × 16-bit → 24-bit (V × I)
-    ; Input: R19:R18 (V), R21:R20 (I), Output: R25:R24:R23 (P)
+; Kirim satu karakter ke Serial Monitor
+send_char:
+wait_tx_ready:
+    lds r23, UCSR0A
+    sbrs r23, UDRE0      ; Tunggu buffer TX kosong
+    rjmp wait_tx_ready
+    sts UDR0, temp       ; Kirim karakter
     ret
 
-display_results:
-    ; Kirim hasil via UART (opsional)
-    ; Format: "V=xxx mV, I=xxx mA, P=xxx mW"
+; Delay ~100ms
+delay_100ms:
+    ldi r24, 100
+delay_1ms_loop:
+    ; Delay ~1ms (dengan asumsi 16MHz)
+    ldi r22, 200
+delay_inner_loop1:
+    ldi r23, 40
+delay_inner_loop2:
+    dec r23
+    brne delay_inner_loop2
+    dec r22
+    brne delay_inner_loop1
+    dec r24
+    brne delay_1ms_loop
     ret
 
+; Delay ~1s
 delay_1s:
-    ; Delay 1 detik (disesuaikan clock speed)
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
+    rcall delay_100ms
     ret
 
-uart_init:
-    ; Inisialisasi UART (9600 baud)
-    ret
+; String konstan
+power_message:
+    .db "Daya: ", 0
