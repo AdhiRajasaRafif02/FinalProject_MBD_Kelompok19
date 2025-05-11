@@ -1,228 +1,216 @@
-; Power Monitoring dengan Arduino UNO (AVR Assembly)
-; Membaca sensor tegangan dari pin A0
-; Membaca sensor arus dari pin A1
-; Menghitung daya (P = V * I) dengan 1 desimal
-; Menampilkan hasil daya di Serial Monitor
+#define __SFR_OFFSET 0x00
+#include "avr/io.h"
+.global main
 
-.include "m328pdef.inc"        ; Include definisi untuk ATmega328P (Arduino UNO)
+main:
+    ; Setup ADC input dan output pin
+    SBI   DDRD, 2           ; PD2 sebagai output
+    CBI   DDRC, 0           ; PC0 sebagai input (ADC0)
 
-; Definisi konstanta
-.equ BAUD_RATE = 9600          ; Baudrate untuk komunikasi serial
-.equ F_CPU = 16000000          ; Frekuensi clock Arduino UNO
+    ; Inisialisasi ADC: AVCC ref, right justified, channel 0
+    LDI   R20, 0x40
+    STS   ADMUX, R20
+    ; Enable ADC, CLK/128
+    LDI   R20, 0x87
+    STS   ADCSRA, R20
 
-; Penghitungan UBRR untuk komunikasi serial
-.equ UBRR_VALUE = F_CPU/(16*BAUD_RATE)-1
+init_serial:
+    CLR   R24
+    STS   UCSR0A, R24
+    STS   UBRR0H, R24
+    LDI   R24, 103
+    STS   UBRR0L, R24       ; Baudrate 9600
+    LDI   R24, 1<<RXEN0 | 1<<TXEN0
+    STS   UCSR0B, R24
+    LDI   R24, 1<<UCSZ00 | 1<<UCSZ01
+    STS   UCSR0C, R24
 
-; Alokasi register
-.def temp = r16                ; Register sementara
-.def voltage = r17             ; Nilai tegangan
-.def current = r18             ; Nilai arus
-.def power_low = r19           ; Byte rendah nilai daya
-.def power_high = r20          ; Byte tinggi nilai daya
-.def decimal = r21             ; Bagian desimal dari daya
-.def digit = r22               ; Digit untuk konversi ASCII
+print_ADC:
+    ; Mulai konversi ADC
+    LDI   R20, 0xC7
+    STS   ADCSRA, R20
 
-; Segment data
-.dseg
-message:        .byte 20       ; Buffer untuk pesan
-power_str:      .byte 10       ; String untuk nilai daya
+wait_ADC:
+    LDS   R21, ADCSRA
+    SBRS  R21, 4
+    RJMP  wait_ADC
+    LDI   R17, 0xD7
+    STS   ADCSRA, R17
 
-; Segment kode
-.cseg
-.org 0x0000                    ; Alamat reset
-    rjmp setup                 ; Lompat ke setup
+    ; Ambil hasil ADC 10-bit
+    LDS   R16, ADCL
+    LDS   R25, ADCH
 
-; Setup program
-setup:
-    ; Inisialisasi stack pointer
-    ldi temp, HIGH(RAMEND)
-    out SPH, temp
-    ldi temp, LOW(RAMEND)
-    out SPL, temp
+    ; Konversi ADC ke suhu (25-40 derajat)
+    ; Formula: Temp = 25 + (ADC * 15 / 1023)
     
-    ; Setup ADC
-    ldi temp, (1<<ADEN)|(1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0) ; Enable ADC, prescaler = 128
-    sts ADCSRA, temp
-    ldi temp, (1<<REFS0)       ; AVCC sebagai referensi
-    sts ADMUX, temp
+    ; Salin nilai ADC ke R17:R16
+    MOV   R17, R25
     
-    ; Setup UART untuk Serial Monitor
-    ; Atur baud rate
-    ldi temp, HIGH(UBRR_VALUE)
-    sts UBRR0H, temp
-    ldi temp, LOW(UBRR_VALUE)
-    sts UBRR0L, temp
+    ; Kalikan dengan 15 (untuk range 15 derajat)
+    MOV   R25, R17      ; Salin high byte ke R25
+    MOV   R24, R16      ; Salin low byte ke R24
     
-    ; Enable transmitter
-    ldi temp, (1<<TXEN0)
-    sts UCSR0B, temp
+    LDI   R20, 15       ; Faktor pengali = 15
+    MUL   R24, R20      ; Kalikan low byte dengan 15
+    MOVW  R22, R0       ; Hasil ke R23:R22
     
-    ; Format: 8 data, 1 stop bit
-    ldi temp, (1<<UCSZ01)|(1<<UCSZ00)
-    sts UCSR0C, temp
+    MUL   R25, R20      ; Kalikan high byte dengan 15
+    ADD   R23, R0       ; Tambahkan ke hasil
     
-    ; Jeda singkat untuk stabilisasi
-    rcall delay_100ms
+    ; Bagi dengan 1023 (pembagian 16-bit yang disederhanakan)
+    ; Untuk keperluan praktis, kita bagi dengan 1024 (shift right 10x)
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    LSR   R23
+    ROR   R22
+    
+    ; Tambahkan offset suhu minimum (25 derajat)
+    LDI   R23, 0        ; Clear R23 (high byte)
+    LDI   R20, 25       ; Tambahkan 25
+    ADD   R22, R20      ; R22 sekarang berisi nilai suhu (25-40)
+    
+    ; Print string "Temp: "
+    LDI   ZL, lo8(temp_str)
+    LDI   ZH, hi8(temp_str)
+    RCALL print_string
+    
+    ; Mencetak nilai suhu
+    MOV   R24, R22      ; Pindahkan suhu ke R24
+    RCALL print_decimal
+    
+    ; Cetak string " C"
+    LDI   ZL, lo8(degree_str)
+    LDI   ZH, hi8(degree_str)
+    RCALL print_string
+    
+    ; Print newline
+    LDI   R24, 0x0D
+    RCALL uart_transmit
+    LDI   R24, 0x0A
+    RCALL uart_transmit
+    
+    RCALL delay_sec
+    RJMP  print_ADC
 
-main_loop:
-    ; Baca sensor tegangan (A0)
-    ldi temp, (1<<REFS0)       ; AVCC referensi, pilih ADC0 (A0)
-    sts ADMUX, temp
-    
-    ; Start konversi
-    lds temp, ADCSRA
-    ori temp, (1<<ADSC)
-    sts ADCSRA, temp
-    
-wait_adc1:
-    ; Tunggu konversi selesai
-    lds temp, ADCSRA
-    sbrc temp, ADSC
-    rjmp wait_adc1
-    
-    ; Ambil hasil tegangan (untuk contoh: skala 0-255 saja)
-    lds voltage, ADCL
-    lds temp, ADCH          ; Baca ADCH untuk mereset flag ADC
-    
-    ; Baca sensor arus (A1)
-    ldi temp, (1<<REFS0)|(1<<MUX0)  ; AVCC referensi, pilih ADC1 (A1)
-    sts ADMUX, temp
-    
-    ; Start konversi
-    lds temp, ADCSRA
-    ori temp, (1<<ADSC)
-    sts ADCSRA, temp
-    
-wait_adc2:
-    ; Tunggu konversi selesai
-    lds temp, ADCSRA
-    sbrc temp, ADSC
-    rjmp wait_adc2
-    
-    ; Ambil hasil arus (untuk contoh: skala 0-255 saja)
-    lds current, ADCL
-    lds temp, ADCH          ; Baca ADCH untuk mereset flag ADC
-    
-    ; Hitung daya: P = V * I (sederhana dengan 1 angka di belakang koma)
-    ; Gunakan multiplikasi 8-bit
-    mul voltage, current    ; Hasil di r1:r0
-    
-    ; Simpan hasil
-    mov power_low, r0
-    mov power_high, r1
-    
-    ; Untuk mendapatkan 1 digit desimal, kita akan menggunakan pendekatan sederhana
-    ; Misalnya jika voltage=3 dan current=2, kita ingin power = 6,0
-    ; Jika voltage=3 dan current=2.5, kita ingin power = 7,5
-    ; Untuk contoh sederhana ambil digit terakhir sebagai desimal
-    mov decimal, power_low
-    andi decimal, 0x0F      ; Ambil 4 bit terendah sebagai desimal
-    
-    ; Tampilkan hasil di Serial Monitor
-    rcall send_power_to_serial
-    
-    ; Jeda sebelum pembacaan berikutnya
-    rcall delay_1s
-    
-    rjmp main_loop
+; -----------------------------------------------
+; Fungsi untuk mencetak string
+print_string:
+    LD    R24, Z+
+    TST   R24
+    BREQ  print_string_end
+    RCALL uart_transmit
+    RJMP  print_string
+print_string_end:
+    RET
 
-; ---- Subrutin untuk mengirim nilai daya ke Serial Monitor ----
-send_power_to_serial:
-    ; Kirim string "Daya: "
-    ldi ZL, LOW(power_message*2)
-    ldi ZH, HIGH(power_message*2)
-    rcall send_string
-    
-    ; Konversi power_high:power_low menjadi desimal
-    ; Untuk contoh sederhana, kita hanya tampilkan nilai langsung
-    ; dan 1 digit desimal
-    
-    ; Konversi nilai bulat ke ASCII dan kirim
-    mov digit, power_high
-    rcall convert_and_send_digit
-    
-    mov digit, power_low
-    lsr digit            ; Bagi dengan 16 (geser 4x ke kanan)
-    lsr digit
-    lsr digit
-    lsr digit
-    rcall convert_and_send_digit
-    
-    ; Kirim tanda koma
-    ldi temp, '.'
-    rcall send_char
-    
-    ; Kirim digit desimal
-    mov digit, decimal
-    andi digit, 0x0F     ; Pastikan hanya 1 digit
-    rcall convert_and_send_digit
-    
-    ; Kirim newline
-    ldi temp, 13         ; CR
-    rcall send_char
-    ldi temp, 10         ; LF
-    rcall send_char
-    
-    ret
+; -----------------------------------------------
+; Fungsi untuk mengirim byte melalui UART
+uart_transmit:
+    LDS   R17, UCSR0A
+    SBRS  R17, UDRE0
+    RJMP  uart_transmit
+    STS   UDR0, R24
+    RET
 
-; Konversi digit menjadi ASCII dan kirim
-convert_and_send_digit:
-    andi digit, 0x0F     ; Pastikan hanya 1 digit
-    ldi temp, '0'
-    add temp, digit      ; Konversi ke ASCII
-    rcall send_char
-    ret
+; -----------------------------------------------
+; Fungsi untuk mencetak nilai desimal
+; Input: R24 = nilai (0-255)
+print_decimal:
+    CLR   R18       ; Digit counter
+    
+    ; Cek apakah nilai >= 100
+    LDI   R19, 100  ; Pembagi
+    MOV   R20, R24  ; Salin nilai asli
+    
+    ; Hitung digit ratusan
+    CLR   R21       ; Reset hasil
+hundreds_loop:
+    CPI   R20, 100
+    BRLO  hundreds_done
+    SUBI  R20, 100
+    INC   R21
+    RJMP  hundreds_loop
+hundreds_done:
+    
+    ; Jika digit ratusan tidak nol, cetak
+    TST   R21
+    BREQ  skip_hundreds
+    MOV   R24, R21
+    LDI   R21, '0'
+    ADD   R24, R21
+    RCALL uart_transmit
+skip_hundreds:
+    
+    ; Hitung digit puluhan
+    MOV   R24, R20  ; Sisa dari pembagian sebelumnya
+    LDI   R19, 10   ; Pembagi
+    CLR   R21       ; Reset hasil
+tens_loop:
+    CPI   R24, 10
+    BRLO  tens_done
+    SUBI  R24, 10
+    INC   R21
+    RJMP  tens_loop
+tens_done:
+    
+    ; Jika digit ratusan nol dan puluhan nol, skip
+    ; Jika tidak, cetak digit puluhan
+    TST   R18
+    BRNE  print_tens
+    TST   R21
+    BREQ  skip_tens
+print_tens:
+    MOV   R18, R21  ; Tandai bahwa setidaknya satu digit telah dicetak
+    MOV   R22, R24  ; Simpan sisa untuk digit satuan
+    MOV   R24, R21
+    LDI   R21, '0'
+    ADD   R24, R21
+    RCALL uart_transmit
+    MOV   R24, R22  ; Kembalikan sisa
+    RJMP  print_ones
+skip_tens:
+    MOV   R18, R21  ; Jangan tandai sebagai telah dicetak
+    
+print_ones:
+    ; Cetak digit satuan
+    LDI   R21, '0'
+    ADD   R24, R21
+    RCALL uart_transmit
+    RET
 
-; Kirim string dari program memory
-send_string:
-    lpm temp, Z+         ; Load byte dari program memory
-    tst temp
-    breq send_string_end ; Jika null terminator, selesai
-    rcall send_char      ; Kirim karakter
-    rjmp send_string     ; Loop hingga semua terkirim
-send_string_end:
-    ret
+; -----------------------------------------------
+; Fungsi delay ~1 detik
+delay_sec:
+    LDI   R20, 255
+l6: LDI   R21, 255
+l7: LDI   R22, 80
+l8: DEC   R22
+    BRNE  l8
+    DEC   R21
+    BRNE  l7
+    DEC   R20
+    BRNE  l6
+    RET
 
-; Kirim satu karakter ke Serial Monitor
-send_char:
-wait_tx_ready:
-    lds r23, UCSR0A
-    sbrs r23, UDRE0      ; Tunggu buffer TX kosong
-    rjmp wait_tx_ready
-    sts UDR0, temp       ; Kirim karakter
-    ret
-
-; Delay ~100ms
-delay_100ms:
-    ldi r24, 100
-delay_1ms_loop:
-    ; Delay ~1ms (dengan asumsi 16MHz)
-    ldi r22, 200
-delay_inner_loop1:
-    ldi r23, 40
-delay_inner_loop2:
-    dec r23
-    brne delay_inner_loop2
-    dec r22
-    brne delay_inner_loop1
-    dec r24
-    brne delay_1ms_loop
-    ret
-
-; Delay ~1s
-delay_1s:
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    rcall delay_100ms
-    ret
-
-; String konstan
-power_message:
-    .db "Daya: ", 0
+; -----------------------------------------------
+; Data string
+.section .rodata
+temp_str:     .asciz "Temp: "
+degree_str:   .asciz " C"
