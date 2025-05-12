@@ -35,6 +35,9 @@ LDI   R26, [NILAI_KELEMBABAN]  ; Ganti [NILAI_KELEMBABAN] dengan nilai dari sens
 RCALL display_humidity
 ```
 
+### 5. Ekspektasi saat program dijalankan
+![Screen Recording 2025-05-12 222346](https://github.com/user-attachments/assets/fc70f7d6-e0d1-4047-bbda-7e65f630a533)
+
 ## Cara Mengintegrasikan dengan Sensor DHT
 
 1. Jeremy perlu menyimpan nilai suhu yang dibaca dari sensor DHT ke register R25
