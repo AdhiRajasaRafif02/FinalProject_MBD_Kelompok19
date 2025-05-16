@@ -7,11 +7,60 @@
         SBI   DDRD, 2           ; LED
         SBI   DDRD, 3           ; Buzzer
         CBI   PORTD, 2           ; LED OFF
-        LDI   R20, 0x40         ; AVCC sebagai reference, right justified, ADC0
+        LDI   R20, 0b11000000         ; AVCC sebagai reference, right justified, ADC0
         STS   ADMUX, R20
 
         LDI   R20, 0x87         ; ADC enable, prescaler 128
         STS   ADCSRA, R20
+
+    I2C_master:
+        CBI   DDRC, 3         ;pin PC3 is i/p
+        ;----------------------------------------------------------
+        RCALL I2C_init        ;initialize TWI module
+        ;----------------------------------------------------------
+    l1: SBIS  PINC, 3
+        RJMP  l1              ;wait for "transmit" button press
+        ;----------------------------------------------------------
+        RCALL I2C_start       ;transmit START condition
+        RCALL I2C_read        ;write data byte
+        RCALL I2C_stop        ;transmit STOP condition
+        ;----------------------------------------------------------
+        RJMP  l1              ;go back for another transmit
+    ;==============================================================
+    I2C_init:
+        LDI   R21, 0
+        STS   TWSR, R21       ;prescaler = 0
+        LDI   R21, 12         ;division factor = 12
+        STS   TWBR, R21       ;SCK freq = 400kHz
+        LDI   R21, (1<<TWEN)
+        STS   TWCR, R21       ;enable TWI
+        RET
+    ;==============================================================
+    I2C_start:
+        LDI   R21, (1<<TWINT)|(1<<TWSTA)|(1<<TWEN)
+        STS   TWCR, R21       ;transmit START condition
+        ;----------------------------------------------------------
+    wt1:LDS   R21, TWCR
+        SBRS  R21, TWINT      ;TWI interrupt = 1?
+        RJMP  wt1             ;no, wait for end of transmission
+        ;----------------------------------------------------------
+        RET
+    ;==============================================================
+    I2C_read:
+        LDI   R21, (1<<TWINT)|(1<<TWEA)|(1<<TWEN)
+        STS   TWCR, R21         ;enable TWI & ACK
+
+    wt: LDS   R21, TWCR
+        SBRS  R21, TWINT
+        RJMP  wt                ;wait for data byte to be read
+
+        LDS   R27, TWDR         ;store received byte
+        RET
+    ;==============================================================
+    I2C_stop:
+        LDI   R21, (1<<TWINT)|(1<<TWSTO)|(1<<TWEN)
+        STS   TWCR, R21       ;transmit STOP condition
+        RET
 
     init_serial:
         CLR   R24
@@ -87,12 +136,13 @@
         ; buat ketika nilai suhu diantara diatas 33, lampu led akan berkedip namun buzzer tidak berbunyi
         ; ketika suhu diatas 36, led akan menyala dan buzzer berbunyi
 
-        CPI  R25, 33
+        //R25
+        CPI  R27, 33
         BRLO  led_off
         RJMP  led_on
 
     led_on:
-        CPI  R25, 36
+        CPI  R27, 36
         BRLO led_on_1sec
         SBI   PORTD, 2       ; LED ON
         SBI   PORTD, 3       ; Buzzer ON
@@ -108,7 +158,6 @@
         RJMP skip_led
 
     skip_led:
-
         RCALL delay_sec
         RJMP  print_ADC
 
