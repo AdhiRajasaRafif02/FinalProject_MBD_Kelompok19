@@ -1,10 +1,6 @@
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
 .global main
-.equ SCK, 5
-.equ MISO, 4
-.equ MOSI, 3
-.equ SS, 2
 
 main:
     CBI   DDRC, 0           ; PC0 sebagai input (ADC0)
@@ -28,28 +24,6 @@ init_serial:
     LDI   R24, 1<<UCSZ00 | 1<<UCSZ01
     STS   UCSR0C, R24
 
-SPI_Master:
-    LDI R16, (1<<DDB2)|(1<<DDB3)|(1<<DDB5) ; MOSI, SCK, SS sebagai output
-    OUT DDRB, R16
-    LDI R16, (1<<SPE)|(1<<MSTR)|(1<<SPR0) ; Enable SPI, Master mode, prescaler 16
-    OUT SPCR, R16
-    SBI DDRD, 4
-    CBI PORTD, 4           ; LED OFF
-
-looping:
-    LDI R16, 0x00
-    OUT SPDR, R16
-
-wait_spi:
-    IN R17, SPSR
-    SBRS R17, SPIF
-    RJMP wait_spi
-
-    //data R16 isinya DHT11
-    IN R26, SPDR
-    SBI PORTD, 4
-    RJMP print_ADC
-
 print_ADC:
     LDI   R20, 0xC7     ; Mulai konversi ADC
     STS   ADCSRA, R20
@@ -68,7 +42,7 @@ wait_ADC:
     MOV   R25, R17      ; Salin high byte ke R25
     MOV   R24, R16      ; Salin low byte ke R24
     
-    LDI   R20, 16       ; Faktor pengali = 16
+    LDI   R20, 100       ; Faktor pengali = 16
     MUL   R24, R20      ; Kalikan low byte dengan 15
     MOVW  R22, R0       ; Hasil ke R23:R22
     
@@ -86,17 +60,17 @@ divide_loop:
 
 divide_done:
     CLR     R23        ; Clear R23 (high byte)
-    LDI     R20, 25       ; Tambahkan 25
-    ADD     R22, R20      ; R22 sekarang berisi nilai suhu (25-40)
     
     ; Print string "Temp: "
     LDI     ZL, lo8(temp)
     LDI     ZH, hi8(temp)
     RCALL   print_string
+    
     ; Mencetak nilai suhu
     MOV   R24, R22      ; Pindahkan suhu ke R24
-    MOV   R25, R22
+    MOV   R25, R22      ; Pindahkan suhu ke R24
     RCALL print_decimal
+    
     ; Cetak string " C"
     LDI   ZL, lo8(degree)
     LDI   ZH, hi8(degree)
@@ -108,33 +82,33 @@ divide_done:
     LDI   R24, 0x0A
     RCALL uart_transmit
 
-status:
-    CP  R26, R25
-    BRSH  led_on
-    SUBI R25, 0b00000110
-    CP   R25, R26
-    BRLO led_on_1sec
-    RJMP led_off
+    ; buat ketika nilai suhu diantara diatas 33, lampu led akan berkedip namun buzzer tidak berbunyi
+    ; ketika suhu diatas 36, led akan menyala dan buzzer berbunyi
+
+    CPI  R25, 33
+    BRLO  led_off
+    RJMP  led_on
 
 led_on:
+    CPI  R25, 36
+    BRLO led_on_1sec
     SBI   PORTD, 2       ; LED ON
     SBI   PORTD, 3       ; Buzzer ON
     RJMP skip_led
 led_on_1sec:
     SBI   PORTD, 2       ; LED ON
     RCALL delay_sec
-    CBI   PORTD, 2       ; LED OFF
-    CBI  PORTD, 3       ; Buzzer OFF
+    CBI   PORTD, 2       ; Buzzer OFF
     RJMP skip_led
 
 led_off:
     CBI   PORTD, 2       ; LED OFF
-    CBI   PORTD, 3       ; Buzzer OFF
     RJMP skip_led
 
 skip_led:
+
     RCALL delay_sec
-    RJMP  looping
+    RJMP  print_ADC
 
 print_string:
     LPM   R24, Z+

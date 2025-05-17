@@ -1,8 +1,8 @@
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
 .global main
+.equ MISO, 4
 
-;===============================================================
 main:
     LDI R17, 0xFF
     OUT DDRC, R17           ; PORTC sebagai output (opsional)
@@ -19,57 +19,26 @@ main:
     LDI R24, (1<<UCSZ00)|(1<<UCSZ01)
     STS UCSR0C, R24
 
+SPI_Slave:
+    LDI R16, (1<<DDB4) ; MISO sebagai output
+    OUT DDRB, R16
+    LDI R16, (1<<SPE) ; Enable SPI
+    OUT SPCR, R16
+
+looping:
     RJMP DHT11_sensor
+agn:
+    OUT SPDR, R26
 
-I2C_slave:
-    LDI   R21, 0xFF
-    OUT   DDRD, R21         ;port D is o/p
-    CBI   DDRC, 3           ;pin PC3 is i/p
+wait_spi:
+    IN R17, SPSR
+    SBRS R17, SPIF
+    RJMP wait_spi
 
-agn1:RCALL I2C_init          ;initialize TWI module
-    RCALL I2C_listen        ;listen to bus to be addressed
-    LDI   R27, R25
-    RCALL I2C_write          ;read data byte
-    LDi   R27, R26
-    RCALL I2C_write          ;read data byte
-    OUT   PORTD, R27        ;and o/p to port D
-
-l1: SBIS  PINC, 3
-    RJMP  l1                ;wait for "listen" button press
-
-    LDI   R26, 0
-    OUT   PORTD, R26        ;clear port D
-    RJMP  DHT11_sensor               ;& go back & listen to bus
-
-I2C_init:
-    LDI   R21, 0b10010000
-    STS   TWAR, R21         ;store slave address 0b10010000
-    LDI   R21, (1<<TWEN)
-    STS   TWCR, R21         ;enable TWI
-    LDI   R21, (1<<TWINT)|(1<<TWEN)|(1<<TWEA)
-    STS   TWCR, R21         ;enable TWI & ACK
-    RET
-
-I2C_listen:
-    LDS   R21, TWCR 
-    SBRS  R21, TWINT
-    RJMP  I2C_listen        ;wait for slave to be addressed
-    RET
-
-I2C_write:
-    STS   TWDR, R27       ;copy SLA+W into data register
-    LDI   R21, (1<<TWINT)|(1<<TWEN)
-    STS   TWCR, R21       ;transmit SLA+W
-    ;----------------------------------------------------------
-wt2:LDS   R21, TWCR
-    SBRS  R21, TWINT
-    RJMP  wt2             ;wait for end of transmission
-    ;----------------------------------------------------------
-    RET
-
+    IN R16, SPDR
+    RJMP looping
 
 DHT11_sensor:
-agn:
     RCALL delay_2s
 
     ; Start signal ke DHT11
@@ -122,7 +91,7 @@ w3: SBIC PINB, 1
     RCALL print_string
     //R26 = temperature
     //R25 = humidity
-    RJMP agn1
+    RJMP agn
 
 ;===============================================================
 ; Subrutin Baca 8-bit DHT11 ke R24
