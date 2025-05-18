@@ -1,13 +1,16 @@
+; Slave
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
 .global main
 .equ MISO, 4
+.equ STATUS_PIN, 7          ; PD7 untuk status flag ke master
 
 main:
     LDI R17, 0xFF
-    OUT DDRC, R17           ; PORTC sebagai output (opsional)
     LDI R17, (1<<PD2)|(1<<PD3)
     OUT DDRD, R17           ; PD2 (LED), PD3 (Buzzer) output
+    SBI DDRD, STATUS_PIN    ; PD7 sebagai output
+    CBI PORTD, STATUS_PIN   ; Status awal LOW
 
     CLR R24
     STS UCSR0A, R24
@@ -26,21 +29,38 @@ SPI_Slave:
     OUT SPCR, R16
 
 looping:
-    RJMP DHT11_sensor
-agn:
-    OUT SPDR, R26
+read_sensor:
+    RCALL DHT11_sensor
+    MOV R18, R25      ; humidity buffer
+    MOV R19, R26      ; temp buffer
+    SBI PORTD, STATUS_PIN ; Status HIGH: data siap
 
-wait_spi:
+    ; Layani permintaan SPI: humidity
+wait_spi1:
     IN R17, SPSR
     SBRS R17, SPIF
-    RJMP wait_spi
-
+    RJMP wait_spi1
     IN R16, SPDR
+    CPI R16, 0x01
+    BRNE wait_spi1
+    OUT SPDR, R18
+
+    ; Layani permintaan SPI: temp
+wait_spi2:
+    IN R17, SPSR
+    SBRS R17, SPIF
+    RJMP wait_spi2
+    IN R16, SPDR
+    CPI R16, 0x02
+    BRNE wait_spi2
+    OUT SPDR, R19
+
+    CBI PORTD, STATUS_PIN
+    RCALL print_reading
     RJMP looping
 
 DHT11_sensor:
-    RCALL delay_2s
-
+    RCALL delay_sec
     ; Start signal ke DHT11
     SBI DDRB, 1
     CBI PORTB, 1
@@ -66,7 +86,9 @@ w3: SBIC PINB, 1
 
     RCALL DHT11_reading  ; temperature decimal (abaikan)
     RCALL DHT11_reading  ; checksum (abaikan)
+    RET
 
+print_reading:
     ; UART: print humidity
     LDI ZL, lo8(label_humi)
     LDI ZH, hi8(label_humi)
@@ -89,12 +111,11 @@ w3: SBIC PINB, 1
     LDI ZL, lo8(label_c)
     LDI ZH, hi8(label_c)
     RCALL print_string
-    //R26 = temperature
-    //R25 = humidity
-    RJMP agn
+    ;R26 = temperature
+    ;R25 = humidity
 
-;===============================================================
-; Subrutin Baca 8-bit DHT11 ke R24
+    RET
+
 DHT11_reading:
     LDI R16, 8
     CLR R24
@@ -113,8 +134,6 @@ w5: SBIC PINB, 1
     BRNE w4
     RET
 
-;===============================================================
-; UART kirim satu karakter di R24
 uart_transmit:
     LDS R17, UCSR0A
     SBRS R17, UDRE0
@@ -122,7 +141,6 @@ uart_transmit:
     STS UDR0, R24
     RET
 
-; Print string dari Z
 print_string:
     LPM R24, Z+
     TST R24
@@ -132,7 +150,6 @@ print_string:
 print_string_end:
     RET
 
-; Cetak bilangan 0-99
 print_decimal:
     CLR R18
     CLR R21
@@ -159,8 +176,6 @@ print_ones:
     RCALL uart_transmit
     RET
 
-;===============================================================
-; Delay Routines
 delay_20ms:
     LDI R21, 255
 l3: LDI R22, 210
@@ -213,8 +228,6 @@ l2: IN R20, TIFR0
     OUT TIFR0, R20
     RET
 
-;===============================================================
-; String untuk UART
 .section .progmem
 label_humi:  .asciz "Humidity: "
 label_temp:  .asciz "Temp: "
